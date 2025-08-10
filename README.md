@@ -15,4 +15,4 @@ Coder.ini - здесь находится собственная чёрная т
 
   
 ## ChkDskGui
-![ChkDskGui](https://github.com/azjio/ChkDskGui/blob/main/ChkDskGui.png "ChkDskGui")
+<img width="716" height="430" alt="Image" src="https://github.com/user-attachments/assets/c8646cd1-643f-4f18-bee7-6a3a42aafc86" />
