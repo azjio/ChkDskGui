@@ -1,11 +1,15 @@
-﻿;- TOP
+;- TOP
 ; Author AZJIO 
-; ChkDskGui v4.3  (07.11.2024)
+; ChkDskGui v4.3.3  (17.04.2026)
 
 ; последнее обновление:
+; Добавлен флаг AutoDirtyBit, ставит галочки дискам требующим проверки
+
+; Добавлена проверка грязного бита в меню пункта
+; Добавлена поддержка цвета в списке дисков
+; Оптимизация функции сортировки
 ; Улучшение читаемости кода: числа в гаджетах, окнах, меню, пунктах, шрифтах, изображениях сделал именованными константами.
 ; Для x86 сделал отключение перенаправления в системную папку в случае если в SysWOW64 отсутствует chkdsk. Запускает x64.
-
 ; игнор ошибок работает с SEM_FAILCRITICALERRORS
 ; байтовые флаги заменил на integer
 ; причесал исходник по отступам и убрал неиспользуемы переменные
@@ -39,7 +43,7 @@ EndIf
 
 
 ;- ● En
-#CountStrLang = 55
+#CountStrLang = 56
 Global Dim Lng.s(#CountStrLang)
 Lng(1) = "Error"
 Lng(2) = "No disc found"
@@ -51,9 +55,9 @@ Lng(7) = "- FS -"
 Lng(8) = "Size"
 Lng(9) = "- Name -"
 Lng(10) = "- Usage -"
-Lng(11) = "\F - Fix disk errors"
-Lng(12) = "\R - Recovery of bad sectors"
-Lng(13) = "\X - Forced volume disconnection"
+Lng(11) = "/F - Fix disk errors"
+Lng(12) = "/R - Recovery of bad sectors"
+Lng(13) = "/X - Forced volume disconnection"
 Lng(14) = "Select all drives"
 Lng(15) = "Start"
 Lng(16) = "Copy to clipboard for Win+R"
@@ -85,8 +89,8 @@ Lng(41) = "Added to the registry:"
 Lng(42) = "Cannot add to registry"
 Lng(43) = "Overwrite ini?"
 Lng(44) = "Run"
-Lng(45) = "ChkDskGui (connected -"
-Lng(46) = "ChkDskGui (disconnected -"
+Lng(45) = "(connected -"
+Lng(46) = "(disconnected -"
 Lng(47) = "Help"
 Lng(48) = "About"
 Lng(49) = "Author"
@@ -96,12 +100,14 @@ Lng(52) = "Open in Explorer"
 Lng(53) = "Continue?"
 Lng(54) = "Fixed"
 Lng(55) = "Rem  "
+Lng(56) = "Check the dirty bit"
 
 
 ;- # Constants
 
 #Desktop = 0
 #Window = 0
+; #q$ = Chr(34) ; кавычка
 
 Enumeration
 	#Menu0
@@ -146,6 +152,7 @@ Enumeration
 	#mDiscMenu
 	#mAbout
 	#mOpen
+	#mDirty
 EndEnumeration
 
 ; константы и структуры MBR/GPT
@@ -208,7 +215,7 @@ EndStructure
 ; конец => константы и структуры MBR/GPT
 
 Global hListView, lvi.LV_ITEM
-Global indexSort = 1
+Global indexSort = 0
 Global SortOrder = 1
 
 Structure STORAGE_PROPERTY_QUERY
@@ -248,11 +255,9 @@ Declare InstanceToWnd(iPid)
 Declare.s DriveGetNumber(DriveLetter$) ; получает номера дисков в формате [0:1]
 Declare.s DriveGetName(DriveLetter$)   ; получает название дисков
 Declare.s GetComString()      ; получает ком-строку
-Declare.s ReadProgramStringOem(iPid)   ; читает строку и перекодирует её в Win-1251
+; Declare.s ReadProgramStringOem(iPid)   ; читает строку и перекодирует её в Win-1251
 Declare MyWindowCallback(WindowId, Message, wParam, lParam)
 Declare.s GetCommand(fill = 0)
-Declare.s ToOem(String$)
-Declare SaveFile_Buff(File.s, *Buff, Size)
 Declare Insert_Command(d)
 Declare Del_item_LV(Mask.l)
 Declare Add_item_LV(Drive2$)
@@ -260,18 +265,25 @@ Declare Add_item_LV_Mask(Mask.l)
 Declare align_col_LV()
 Declare RegToMenuDisk()
 Declare RegJump(valie.s)
-Declare KillProcess_hWin(hwin)
 Declare RegExistsKey()
 Declare DuplicateDriveTest()
 Declare align_Windows()
+Declare DirtyQuery()
 Declare HideCheckBox(gadget, item)
 Declare.s Get_MBR_GPT(DriveNum$)
+Declare Callback_Header(hWnd, Message, wParam, lParam)
+; перемещены в "include\other.pb"
+; Declare KillProcess_hWin(hwin)
+; Declare.s ToOem(String$)
+; Declare SaveFile_Buff(File.s, *Buff, Size)
 
 ;- ● IncludeFile
 XIncludeFile "include\Sort.pb"
 XIncludeFile "include\SetCoor.pb"
 XIncludeFile "include\RAW.pb"
 XIncludeFile "include\ListProgress.pb"
+XIncludeFile "include\Color.pb"
+XIncludeFile "include\other.pb"
 
 ; Сохранение размера и координат часть 1
 Declare SaveINI() ; Сохранения в ini
@@ -292,6 +304,7 @@ Global Dim MBR_GPT.s(0)
 ; MBR_GPT(0) = "GPT"
 Define DiskCur$
 Global Admin = IsUserAnAdmin_()
+Global LV_Style
 
 
 Define i
@@ -381,19 +394,10 @@ Global Color$ = "1e"
 Global Font1$ = "Consolas"
 Global Font2$ = "Segoe UI"
 Global AlignWin = 1
-
-; без копирования
-Procedure Limit(*Value.integer, Min, Max)
-	Protected res
-	If *Value\i < Min
-		*Value\i = Min
-		res = 1
-	ElseIf *Value\i > Max
-		*Value\i = Max
-		res = 1
-	EndIf
-	ProcedureReturn res
-EndProcedure
+Global Grid
+Global isColor
+Global ExeAfter$
+Global AutoDirtyBit
 
 ;- ● ini
 ; получаем путь к ини по имени программы
@@ -415,9 +419,9 @@ If FileSize(ini$) > 3 And OpenPreferences(ini$) And PreferenceGroup("set")
 		WritePreferenceInteger("indexSort" , indexSort)
 	EndIf
 	AlignWin = ReadPreferenceInteger("align", 1)
-	If Limit(@AlignWin, 0, 1)
-		WritePreferenceInteger("align" , AlignWin)
-	EndIf
+; 	If Limit(@AlignWin, 0, 1) ; нет смысла исправлять, так как нет последствий
+; 		WritePreferenceInteger("align" , AlignWin)
+; 	EndIf
 	SortOrder = ReadPreferenceInteger("SortOrder", 1)
 	If Not(SortOrder = 1 Or SortOrder = -1)
 		SortOrder = 1
@@ -433,6 +437,9 @@ If FileSize(ini$) > 3 And OpenPreferences(ini$) And PreferenceGroup("set")
 
 	ignore$ = ReadPreferenceString("ignore", "")
 	ForceLang = ReadPreferenceInteger("ForceLang", ForceLang)
+	ExeAfter$ = ReadPreferenceString("ExeAfter", "")
+	Grid = ReadPreferenceInteger("Grid", Grid)
+	AutoDirtyBit = ReadPreferenceInteger("AutoDirtyBit", AutoDirtyBit)
 
 
 	With cs
@@ -442,6 +449,15 @@ If FileSize(ini$) > 3 And OpenPreferences(ini$) And PreferenceGroup("set")
 		\w = ReadPreferenceInteger("WinW", 692)
 		\h = ReadPreferenceInteger("WinH", 210)
 	EndWith
+	PreferenceGroup("Color")
+; 	bgWin = ColorValidate(ReadPreferenceString("bgWin", ""), bgWin)
+	isColor = ReadPreferenceInteger("color", isColor)
+	If isColor ; считываем цвет только если включена поддержка
+		background = ColorValidate(ReadPreferenceString("background", ""), background)
+		foreground = ColorValidate(ReadPreferenceString("foreground", ""), foreground)
+		ForeColorHeader = ColorValidate(ReadPreferenceString("foreground", ""), foreground)
+		borderHeader = ColorValidate(ReadPreferenceString("border", ""), borderHeader)
+	EndIf
 
 	ClosePreferences()
 	;  	Debug Color$
@@ -456,6 +472,37 @@ If FileSize(ini$) > 3 And OpenPreferences(ini$) And PreferenceGroup("set")
 									 ; 	MessageRequester("Координаты после", Str(cs\x) + #CRLF$ + Str(cs\y) + #CRLF$ + Str(cs\w) + #CRLF$ + Str(cs\h))
 	fINI = 0
 EndIf
+
+
+; Procedure SetWindowTheme()
+; 	Protected Theme.s, cmbRexID, ChildGadget, Buffer.s, hwnd
+; 	If OSVersion() >= #PB_OS_Windows_10
+; 		Theme = "DarkMode_Explorer"
+; 	Else
+; 		Theme = "Explorer"
+; 	EndIf
+; 	
+; 	; 	SetWindowTheme_(GadgetID(#LIG), @Theme, 0)
+; 	; 	SetWindowTheme_(GadgetID(#LIG), @Theme, 0)
+; 	; 	SetWindowTheme_(GadgetID(#btnMenu), @Theme, 0)
+; 	SetGadgetColor(#LIG, #PB_Gadget_BackColor, background)
+; 	SetGadgetColor(#LIG, #PB_Gadget_FrontColor, foreground)
+; 	
+; 	SetWindowTheme_(GadgetID(#chF), @"", @"")
+; 	SetWindowTheme_(GadgetID(#chR), @"", @"")
+; 	SetWindowTheme_(GadgetID(#chX), @"", @"")
+; 	SetWindowTheme_(GadgetID(#chAll), @"", @"")
+; 	SetGadgetColor(#chF, #PB_Gadget_BackColor, background)
+; 	SetGadgetColor(#chF, #PB_Gadget_FrontColor, foreground)
+; 	SetGadgetColor(#chR, #PB_Gadget_BackColor, background)
+; 	SetGadgetColor(#chR, #PB_Gadget_FrontColor, foreground)
+; 	SetGadgetColor(#chX, #PB_Gadget_BackColor, background)
+; 	SetGadgetColor(#chX, #PB_Gadget_FrontColor, foreground)
+; 	SetGadgetColor(#chAll, #PB_Gadget_BackColor, background)
+; 	SetGadgetColor(#chAll, #PB_Gadget_FrontColor, foreground)
+; 	SetGadgetColor(#StatusBar, #PB_Gadget_BackColor, background)
+; 	SetGadgetColor(#StatusBar, #PB_Gadget_FrontColor, foreground)
+; EndProcedure
 
 
 
@@ -522,9 +569,9 @@ If UserIntLang
 	Lng(8) = "Размер"
 	Lng(9) = "     - Имя - "
 	Lng(10) = "- Занято -"
-	Lng(11) = "\F - Исправление ошибок на диске"
-	Lng(12) = "\R - Восстановление поврежденных секторов"
-	Lng(13) = "\X - Принудительное отключение тома"
+	Lng(11) = "/F - Исправление ошибок на диске"
+	Lng(12) = "/R - Восстановление поврежденных секторов"
+	Lng(13) = "/X - Принудительное отключение тома"
 	Lng(14) = "Выделить все диски"
 	Lng(15) = "Старт"
 	Lng(16) = "Скопировать в буфер обмена для Win+R"
@@ -556,8 +603,8 @@ If UserIntLang
 	Lng(42) = "Не удаётся добавить в реестр"
 	Lng(43) = "Перезаписать ini?"
 	Lng(44) = "Выполнить"
-	Lng(45) = "ChkDskGui (подключен "
-	Lng(46) = "ChkDskGui (отключен "
+	Lng(45) = "(подключен "
+	Lng(46) = "(отключен "
 	Lng(47) = "Справка"
 	Lng(48) = "О программе"
 	Lng(49) = "Автор"
@@ -567,6 +614,7 @@ If UserIntLang
 	Lng(53) = "Продолжить?"
 	Lng(54) = "Fixed"
 	Lng(55) = "Rem  "
+	Lng(56) = "Проверить грязный бит"
 EndIf
 
 ;- ● DataSection
@@ -608,7 +656,7 @@ If fINI
 	; 	DesktopH = DesktopHeight(#Desktop)
 	With cs
 		\h = 24 + 18 * CountDisk + 100 ; подсчитали усреднённо на Win10 при 18 - высота пункта, 24 - высота названия колонок, 100 остальное.
-									   ;  		\h = 24 + 18 * CountDisk + 58 + BorderY ; MessageRequester(Lng(37), Str(BorderY))
+;  		\h = 24 + 18 * CountDisk + 58 + BorderY ; MessageRequester(Lng(37), Str(BorderY))
 		\w = 692
 		\x = (DesktopWidth(#Desktop) - \w) / 2
 		\y = (DesktopHeight(#Desktop) - \h) / 2
@@ -630,6 +678,7 @@ Define SelDisk$
 ;     ProcedureReturn headerRect\bottom - headerRect\top ; 24
 ; EndProcedure
 
+
 ; Создаём окно
 ;-┌──GUI──┐
 hGUI = OpenWindow(#Window, cs\x, cs\y, cs\w, cs\h, "ChkDskGui", #PB_Window_MinimizeGadget | #PB_Window_MaximizeGadget | #PB_Window_SizeGadget | #PB_Window_Invisible)
@@ -638,13 +687,18 @@ hGUI = OpenWindow(#Window, cs\x, cs\y, cs\w, cs\h, "ChkDskGui", #PB_Window_Minim
 
 
 If hGUI
+; 	SetWindowColor(#Window, bgWin)
 ; 	HideWindow(#Window, #True)
 	; 	загружаем иконки 16х16 в системный список изображений
 	CatchImage(#img0, ?DiskFixed)
 	CatchImage(#img1, ?DiskRem)
 	CatchImage(#img2, ?DiskUnk)
 	; Левый столбец. Список со значками с чек-боксом, выделять однос строкой
-	hListView = ListIconGadget(#LIG, 5, 5, cs\w - 10, cs\h - 90, Lng(3), 60, #PB_ListIcon_CheckBoxes | #PB_ListIcon_FullRowSelect)
+	LV_Style = #PB_ListIcon_CheckBoxes | #PB_ListIcon_FullRowSelect
+	If Grid
+		LV_Style | #PB_ListIcon_GridLines
+	EndIf
+	hListView = ListIconGadget(#LIG, 5, 5, cs\w - 10, cs\h - 90, Lng(3), 60, LV_Style)
 
 	; 	Стиль списка дисков, чёрный
 	; 	SetGadgetColor(#LIG, #PB_Gadget_BackColor , RGB(55, 55, 55))
@@ -750,6 +804,14 @@ If hGUI
 	; 	ButtonGadget(7, cs\w - 179, cs\h - 52, 26, 42, "i")
 	; 	SetActiveGadget(6)
 	SetGadgetText(#StatusBar, "chkdsk.exe " + DiskCur$ + GetComString())
+	
+	If isColor
+		; 	SetWindowTheme()
+		SetGadgetColor(#LIG, #PB_Gadget_BackColor, background)
+		SetGadgetColor(#LIG, #PB_Gadget_FrontColor, foreground)
+		Main_References = SetWindowLongPtr_(GadgetID(#LIG), #GWL_WNDPROC, @Callback_Header())
+		hHeader = SendMessage_(GadgetID(#LIG), #LVM_GETHEADER, 0, 0)
+	EndIf
 
 	; Для подсказок часть 2 из 3-х
 	AddGadgetToolTip(#StatusBar, Lng(16), 300, 0)
@@ -792,6 +854,10 @@ If hGUI
 		; 		DisableMenuItem(#Menu0, 7, 1)
 		SetMenuItemText(#Menu0, #mHelpGUI, Lng(36))
 	EndIf
+	If CreatePopupMenu(#Menu1) ; Создаёт всплывающее меню
+		MenuItem(#mOpen, Lng(52))
+		MenuItem(#mDirty, Lng(56))
+	EndIf
 	If Not Admin
 		SetMenuItemText(#Menu0, #mCheckingSel, Lng(27) + " " + Lng(32))
 		DisableMenuItem(#Menu0, #mCheckingSel, 1)
@@ -802,9 +868,8 @@ If hGUI
 		EndIf
 
 		DisableMenuItem(#Menu0, #mDiscMenu, 1)
-	EndIf
-	If CreatePopupMenu(#Menu1) ; Создаёт всплывающее меню
-		MenuItem(#mOpen, Lng(52))
+		SetMenuItemText(#Menu1, #mDirty, Lng(56) + " " + Lng(32))
+		DisableMenuItem(#Menu1, #mDirty, 1)
 	EndIf
 	; 	CheckBoxGadget(#chAll, 3, 128, 17, 17, "")
 
@@ -846,7 +911,8 @@ If hGUI
 	AddKeyboardShortcut(#Window, #PB_Shortcut_Control | #PB_Shortcut_Shift | #PB_Shortcut_C, #mComLineFull) ; Ctrl+Shift+C
 ; 	AddKeyboardShortcut(#Window, #PB_Shortcut_Control | #PB_Shortcut_E, #mOpen) ; Ctrl+E
 	AddKeyboardShortcut(#Window, #PB_Shortcut_Return, #mStart) ; Enter
-  
+	
+	
 
 ;-┌──Loop──┐
 	Repeat
@@ -911,6 +977,7 @@ If hGUI
 						If Not Asc(res$)
 							Continue
 						EndIf
+						
 						; SetClipboardText("cmd.exe /c (Title Check Disk " + info$ + " & @Echo off & @Echo. & Color " + Color$ + " & chkdsk.exe " + disk$ + GetComString() + " & set /p Ok=^>^>)")
 						; cmd.exe /c (Title Check Disk "тут инфа о диске" & @Echo off & @Echo. & Color f0 & chkdsk.exe Z: /F /X & set /p Ok=^>^>)
 						; MessageRequester("Выбранные", res$)
@@ -1035,6 +1102,8 @@ If hGUI
 						SaveFile_Buff(ini$, ?ini, ?iniend - ?ini)
 					Case #mDiscMenu
 						RegToMenuDisk()
+					Case #mDirty
+						DirtyQuery()
 					Case #mOpen
 						i = GetGadgetState(#LIG)
 						If i <> -1
@@ -1042,12 +1111,15 @@ If hGUI
 							RunProgram("explorer.exe", DiskCur$ + "\", "")
 						EndIf
 					Case #mAbout
-						If MessageRequester(Lng(48), Lng(49) + " AZJIO" + #CRLF$ + Lng(50) + " 4.3  (07.11.2024)" + #CRLF$ + #CRLF$ + Lng(51), #MB_OKCANCEL) = #IDOK
+						If MessageRequester(Lng(48), Lng(49) + " AZJIO" + #CRLF$ + Lng(50) + " 4.3.3  (17.04.2026)" + #CRLF$ + #CRLF$ + Lng(51), #MB_OKCANCEL) = #IDOK
 							RunProgram("https://usbtor.ru/viewtopic.php?t=1478")
 						EndIf
 ; 						MessageRequester("Размеры окна", Str(WindowHeight(#Window, #PB_Window_FrameCoordinate)) + " " + Str(WindowWidth(#Window, #PB_Window_FrameCoordinate)))
 				EndSelect
 			Case #PB_Event_CloseWindow
+				If isColor
+					DeleteObject_(hLinePen)
+				EndIf
 				SaveINI()
 				CompilerIf #PB_Compiler_Processor = #PB_Processor_x86 ; если ChkDskGui-x86
 					If RedirectRequired
@@ -1084,17 +1156,6 @@ Procedure RegJump(valie.s)
 		EndIf
 		RunProgram("regedit.exe")
 	EndIf
-EndProcedure
-
-Procedure KillProcess_hWin(hwin)
-	Protected phandle, result, PID
-	GetWindowThreadProcessId_(hwin, @PID)
-	phandle = OpenProcess_(#PROCESS_TERMINATE, #False, PID)
-	If phandle <> #Null
-		result = TerminateProcess_(phandle, 1) ; успех <> 0
-		CloseHandle_(phandle)
-	EndIf
-	ProcedureReturn result
 EndProcedure
 
 Procedure Insert_Command(d)
@@ -1159,20 +1220,9 @@ Procedure RegToMenuDisk()
 	EndIf
 EndProcedure
 
-Procedure SaveFile_Buff(File.s, *Buff, Size)
-	Protected Result = #False
-	Protected ID = CreateFile(#PB_Any, File)
-	If ID
-		If WriteData(ID, *Buff, Size) = Size
-			Result = #True
-		EndIf
-		CloseFile(ID)
-	EndIf
-	ProcedureReturn Result
-EndProcedure
 
 Procedure.s GetCommand(fill = 0)
-	Protected res$ = "", TrgS = 0, k, info$, disk$
+	Protected res$, TrgS, k, info$, disk$
 	For k = 0 To CountGadgetItems(#LIG) - 1
 		info$ = ""
 		If GetGadgetItemState(#LIG, k) & #PB_ListIcon_Checked
@@ -1196,7 +1246,11 @@ Procedure.s GetCommand(fill = 0)
 			TrgS + 1
 		EndIf
 	Next
-	If Not TrgS
+	If TrgS
+		If Asc(ExeAfter$)
+			res$ + "Start " + #DOUBLEQUOTE$ + #DOUBLEQUOTE$ + " " + ExeAfter$ + "&"
+		EndIf
+	Else
 		MessageRequester(Lng(37), Lng(40))
 		res$ = ""
 	EndIf
@@ -1204,6 +1258,7 @@ Procedure.s GetCommand(fill = 0)
 EndProcedure
 
 Procedure Add_item_LV(Drive2$)
+	Protected item, i
 	Drive2$ = ComboListDrive(Drive2$)
 	If Drive2$ <> "-"
 ; 		If Mid(Drive2$, 10, 3) = "Fix"
@@ -1226,18 +1281,28 @@ Procedure Add_item_LV(Drive2$)
 		EndSelect
 
 		; перерисовка заполненности диска
-		Protected i = SendMessage_(hListView, #LVM_GETITEMCOUNT, 0, 0) - 1
+		item = CountGadgetItems(#LIG) - 1 ; добавленный последний, получить из количества
 		If GetDiskFreeSpaceEx_(Left(Drive2$, 2), @lpFreeBytesAvailable, @lpTotalNumberOfBytes, 0)
 			If lpTotalNumberOfBytes > 0 ; чтобы не было сбоя при неопределении диска, на 0 делить нельзя
-; 				UpdateProgress(#LIG, i, 8, (lpTotalNumberOfBytes-lpFreeBytesAvailable) *100 / lpTotalNumberOfBytes)
-				UpdateProgress(#LIG, i, 8, Round((lpTotalNumberOfBytes - lpFreeBytesAvailable) * 100 / lpTotalNumberOfBytes , #PB_Round_Nearest))
+; 				UpdateProgress(#LIG, item, 8, (lpTotalNumberOfBytes-lpFreeBytesAvailable) *100 / lpTotalNumberOfBytes)
+				UpdateProgress(#LIG, item, 8, Round((lpTotalNumberOfBytes - lpFreeBytesAvailable) * 100 / lpTotalNumberOfBytes , #PB_Round_Nearest))
 			Else
-				UpdateProgress(#LIG, i, 8, 1)
+				UpdateProgress(#LIG, item, 8, 1)
 			EndIf
 		Else
-			UpdateProgress(#LIG, i, 8, 0)
+			UpdateProgress(#LIG, item, 8, 0)
 		EndIf
 		; конец => перерисовка заполненности диска
+		If AutoDirtyBit And Admin
+			If IsVolumeDirty(Drive2$) = 1
+				SetGadgetItemState(#LIG, item, #PB_ListIcon_Checked)
+; 				For i = 0 To item
+; 					If Asc(Drive2$) = Asc(GetGadgetItemText(#LIG, i))
+; 						SetGadgetItemState(#LIG, i, #PB_ListIcon_Checked)
+; 					EndIf
+; 				Next
+			EndIf
+		EndIf
 	EndIf
 EndProcedure
 
@@ -1253,7 +1318,7 @@ Procedure Add_item_LV_Mask(Mask.l)
 	DuplicateDriveTest()
 	align_col_LV()
 	align_Windows()
-	SetWindowTitle(#Window, Lng(45) + title + ")")
+	SetWindowTitle(#Window, "ChkDskGui " + Lng(45) + title + ")")
 
 	; 	сортировка
 	UpdatelParam()
@@ -1299,7 +1364,7 @@ Procedure Del_item_LV(Mask.l)
 			; 			z + 1
 		EndIf
 	Next
-	SetWindowTitle(#Window, Lng(46) + title + ")")
+	SetWindowTitle(#Window, "ChkDskGui " + Lng(46) + title + ")")
 	; 	CountDisk - z ; потому что не используем по коду
 	align_col_LV()
 	align_Windows()
@@ -1350,6 +1415,10 @@ Procedure HideCheckBox(gadget, item)
 	lvi\stateMask = #LVIS_STATEIMAGEMASK
 	SendMessage_(GadgetID(#LIG), #LVM_SETITEM, 0, @lvi)
 EndProcedure
+
+
+
+
 
 Procedure MyWindowCallback(WindowId, Message, wParam, lParam)
 ;-┌──MyWindowCallback──┐
@@ -1465,21 +1534,6 @@ Procedure MyWindowCallback(WindowId, Message, wParam, lParam)
 ;-└──MyWindowCallback──┘
 EndProcedure
 
-Procedure InstanceToWnd(iPid)
-	Protected hWnd = FindWindow_(0, 0)
-	Protected iPid1, ThreadID
-	While hWnd <> 0
-		If GetParent_(hWnd) = 0
-			ThreadID = GetWindowThreadProcessId_(hWnd, @iPid1)
-			If iPid1 = iPid
-				Break
-			EndIf
-		EndIf
-		hWnd = GetWindow_(hWnd, #GW_HWNDNEXT)
-	Wend
-	ProcedureReturn hWnd
-EndProcedure
-
 ; Получить буквы дисков
 Procedure GetDrives(List Drive.s())
 	Protected i, Drive2$
@@ -1527,7 +1581,7 @@ EndProcedure
 
 Procedure.s ComboListDrive(Drive2$)
 	Protected.l type, i
-	Protected.s Lfwrk, FileSystem, VolName, r = Chr(10)
+	Protected.s Lfwrk, FileSystem, VolName
 	Protected.q total_bytes
 	Lfwrk = Drive2$ + ":\"
 	type = GetDriveType_(Lfwrk)
@@ -1535,17 +1589,17 @@ Procedure.s ComboListDrive(Drive2$)
 	VolName = Space(256)
 	Select type
 		Case #DRIVE_REMOVABLE
-			Drive2$ + ":" + r + "[" + DriveGetNumber(Drive2$ + ":") + "]" + r + Lng(55)
+			Drive2$ + ":" + #LF$ + "[" + DriveGetNumber(Drive2$ + ":") + "]" + #LF$ + Lng(55)
 		Case #DRIVE_FIXED
-			Drive2$ + ":" + r + "[" + DriveGetNumber(Drive2$ + ":") + "]" + r + Lng(54)
+			Drive2$ + ":" + #LF$ + "[" + DriveGetNumber(Drive2$ + ":") + "]" + #LF$ + Lng(54)
 		Case #DRIVE_REMOTE, #DRIVE_CDROM, #DRIVE_RAMDISK
 			ProcedureReturn "-"
 		Case #DRIVE_NO_ROOT_DIR
-			ProcedureReturn Drive2$ + ":" + r + "[" + DriveGetNumber(Drive2$ + ":") + "]" + r + "No_Root_Dir"
+			ProcedureReturn Drive2$ + ":" + #LF$ + "[" + DriveGetNumber(Drive2$ + ":") + "]" + #LF$ + "No_Root_Dir"
 		Case #DRIVE_UNKNOWN
-			ProcedureReturn Drive2$ + ":" + r + "[" + DriveGetNumber(Drive2$ + ":") + "]" + r + "Unknown"
+			ProcedureReturn Drive2$ + ":" + #LF$ + "[" + DriveGetNumber(Drive2$ + ":") + "]" + #LF$ + "Unknown"
 		Default
-			ProcedureReturn Drive2$ + ":" + r + "[" + DriveGetNumber(Drive2$ + ":") + "]" + r + "---"
+			ProcedureReturn Drive2$ + ":" + #LF$ + "[" + DriveGetNumber(Drive2$ + ":") + "]" + #LF$ + "---"
 	EndSelect
 
 	If Mid(Drive2$, 5, 3) = "?:?" And TestVirtual(Drive2$)
@@ -1553,31 +1607,31 @@ Procedure.s ComboListDrive(Drive2$)
 	EndIf
 
 	If GetVolumeInformation_(@Lfwrk, @VolName, 255, 0, 0, 0, @FileSystem, 255)
-		Drive2$ + r + VolName + r + FileSystem
+		Drive2$ + #LF$ + VolName + #LF$ + FileSystem
 		; 		Drive2$ = DriveGetNumber(Left(Drive2$,1) + ":") + "  " + Drive2$
 		If (GetDiskFreeSpaceEx_(Lfwrk, 0, @total_bytes, 0))
 			; TO DO FormatNumber() Done
 			; Drive2$ + "  "+  Str(total_bytes/1048576)+ " Мб"
-; 			Drive2$ + r + StrF(ValF(StrF(total_bytes / 1024)) / 1048576, 3)
-			Drive2$ + r + FormatNumber(total_bytes / 1073741824, 3, ".", "")
+; 			Drive2$ + #LF$ + StrF(ValF(StrF(total_bytes / 1024)) / 1048576, 3)
+			Drive2$ + #LF$ + FormatNumber(total_bytes / 1073741824, 3, ".", "")
 		Else
-			Drive2$ + r + "---"
+			Drive2$ + #LF$ + "---"
 		EndIf
 	Else
-		Drive2$ + r + "---" + r + "---"
+		Drive2$ + #LF$ + "---" + #LF$ + "---"
 		If OSVersion() < #PB_OS_Windows_Vista
 			total_bytes = GetDriveSize(Left(Drive2$, 2))
 			If total_bytes
-				Drive2$ + r + FormatNumber(total_bytes / 1073741824, 3, ".", "")
+				Drive2$ + #LF$ + FormatNumber(total_bytes / 1073741824, 3, ".", "")
 			Else
-				Drive2$ + r + "---"
+				Drive2$ + #LF$ + "---"
 			EndIf
 		Else
-			Drive2$ + r + "---"
+			Drive2$ + #LF$ + "---"
 		EndIf
 	EndIf
-	Drive2$ + r + DriveGetName(Left(Drive2$, 2))
-	Drive2$ + r + Get_MBR_GPT(StringField(Drive2$, 2, Chr(10)))
+	Drive2$ + #LF$ + DriveGetName(Left(Drive2$, 2))
+	Drive2$ + #LF$ + Get_MBR_GPT(StringField(Drive2$, 2, Chr(10)))
 ; 	Debug Drive2$
 
 	ProcedureReturn Drive2$
@@ -1685,6 +1739,19 @@ Procedure.s GetComString()
 	ProcedureReturn ComStr
 EndProcedure
 
+
+Procedure.s ReadProgramStringOem(iPid)
+	Protected Ret$, *Buff, SizeBuff = AvailableProgramOutput(iPid)
+	If SizeBuff > 0
+		*Buff = AllocateMemory(SizeBuff)
+		ReadProgramData(iPid, *Buff, SizeBuff)
+		OemToCharBuffA(*Buff, *Buff, SizeBuff) ; 866 в Windows1251
+		Ret$ = PeekS(*Buff, SizeBuff, #PB_Ascii)
+		FreeMemory(*Buff)
+	EndIf
+	ProcedureReturn Ret$
+EndProcedure
+
 ; X:\Windows\System32\
 Procedure HelpChkdsk()
 	Protected Prog = RunProgram("chkdsk.exe", "/?", "", #PB_Program_Open | #PB_Program_Read | #PB_Program_Hide)
@@ -1696,39 +1763,14 @@ Procedure HelpChkdsk()
 		CloseProgram(Prog)
 	EndIf
 	Output$ = ReplaceString(Output$, #CRLF$ + #CRLF$ + #CRLF$, #CRLF$ + #CRLF$) ; чтобы на экран умещалось
-	Output$ = ReplaceString(Output$, #CRLF$ + "                      ", " ")   ; чтобы на экран умещалось
+	Output$ = ReplaceString(Output$, #CRLF$ + "                      ", " ")	; чтобы на экран умещалось
+; 	Output$ = ToOem(Output$)
 
 	If Len(Output$) > 20
 		MessageRequester(Lng(47), Output$)
 	Else
 		RunProgram(cmd$, "/c (Title Check Disk Help & @Echo off & Color " + Color$ + " & chkdsk.exe /? & set /p Ok=^>^>)", "")
 	EndIf
-EndProcedure
-
-
-Procedure.s ReadProgramStringOem(iPid)
-	Protected Ret$ = "", *Buff, SizeBuff = AvailableProgramOutput(iPid)
-	If SizeBuff > 0
-		*Buff = AllocateMemory(SizeBuff)
-		ReadProgramData(iPid, *Buff, SizeBuff)
-		OemToCharBuffA(*Buff, *Buff, SizeBuff) ; 866 в Windows1251
-		Ret$ = PeekS(*Buff, SizeBuff, #PB_Ascii)
-		FreeMemory(*Buff)
-	EndIf
-	ProcedureReturn Ret$
-EndProcedure
-
-; Windows1251 в 866
-Procedure.s ToOem(String$)
-	Protected Ret$ = "", *Buff, SizeBuff = Len(String$)
-	If SizeBuff > 0
-		*Buff = AllocateMemory(SizeBuff + 1)
-		PokeS(*Buff, String$, SizeBuff, #PB_Ascii)
-		CharToOemBuffA(*Buff, *Buff, SizeBuff)
-		Ret$ = PeekS(*Buff, SizeBuff, #PB_Ascii)
-		FreeMemory(*Buff)
-	EndIf
-	ProcedureReturn Ret$
 EndProcedure
 
 ; Для подсказок часть 3 из 3-х
@@ -1777,6 +1819,28 @@ Procedure AddGadgetToolTip(GadgetID.l, ToolText$, MaxWidth.l = 0, Balloon.l = 1,
 EndProcedure
 
 
+Procedure DirtyQuery()
+	Protected Output$, Prog, i, DiskCur$
+	i = GetGadgetState(#LIG)
+	If i <> -1
+		DiskCur$ = GetGadgetItemText(#LIG, i)
+		Prog = RunProgram("fsutil.exe", "dirty query " + DiskCur$, "", #PB_Program_Open | #PB_Program_Read | #PB_Program_Hide)
+		If Prog
+			While ProgramRunning(Prog)
+				Output$ + ReadProgramStringOem(Prog)
+			Wend
+			; 		ExitCode = ProgramExitCode(Prog)
+			CloseProgram(Prog)
+		EndIf
+		
+		If Asc(Output$)
+			; 		MessageRequester(Str(ExitCode), Output$)
+			MessageRequester("", Output$)
+		EndIf
+	EndIf
+EndProcedure
+
+
 
 Procedure SaveINI()
 	If OpenPreferences(ini$) And PreferenceGroup("set")
@@ -1793,25 +1857,4 @@ Procedure SaveINI()
 	EndIf
 EndProcedure
 
-; IDE Options = PureBasic 6.04 LTS (Windows - x64)
-; CursorPosition = 273
-; FirstLine = 269
-; Folding = ------
-; Optimizer
-; EnableXP
-; EnableAdmin
-; DPIAware
-; UseIcon = image\ChkDskGui.ico
-; Executable = ChkDskGui.exe
-; CompileSourceDirectory
-; Compiler = PureBasic 6.04 LTS - C Backend (Windows - x64)
-; DisableCompileCount = 4
-; EnableBuildCount = 0
-; EnableExeConstant
-; IncludeVersionInfo
-; VersionField0 = 4.3.0.%BUILDCOUNT
-; VersionField2 = AZJIO
-; VersionField3 = ChkDskGui
-; VersionField4 = 4.3.0
-; VersionField6 = ChkDskGui
-; VersionField9 = AZJIO
+
